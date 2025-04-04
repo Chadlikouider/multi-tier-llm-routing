@@ -1,0 +1,32 @@
+defaults:
+  - _self_
+  - optimizer: qt
+  - user_groups: p0
+
+seed: 0
+qor_target: 0.5
+
+requests_dataset: wiki_en
+region: CISO
+
+vp: 24  # validity period duration
+
+model_qualities:
+  - bad
+  - good
+
+machines:
+  - _target_: src.scenario.Machine
+    name: AWS_p4d.24xlarge
+    # https://engineering.teads.com/sustainability/carbon-footprint-estimator-for-aws-instances/?estimation=true&instance_id=2518&region_id=2247&compute_hours=1#calculator or https://docs.google.com/spreadsheets/d/1DqYgQnEDLQVQm5acMAhLgHLD8xXCG9BIrk-_Nv6jF3k/edit?gid=504755275#gid=504755275
+    power_usage: 3.7818  # kW for AWS p4d (8xA100-SXM4-80GB)
+    # idle_power_usage: 0.7448  # kW for AWS p4d (8xA100-SXM4-80GB)
+    # max_power_usage: [3.7818, 3.7818]  # kW for AWS p4d (8xA100-SXM4-80GB)
+    pue: 1
+    performance:
+      # https://buildkite.com/vllm/performance-benchmark/builds/8710
+      llama8B: 41710  # 11.5862 * 3600 = 41710
+      good: 18176  # 5.04876 * 3600 = 18176
+    embedded_carbon: 135
+
+result_dir: results

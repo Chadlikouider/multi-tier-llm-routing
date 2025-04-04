@@ -1,0 +1,26 @@
+_target_: src.optimizer.QtOnline
+horizon: 24  # hours
+oracle: False
+lt_frequency: 24
+outlook_frequency: 0
+
+# Callbacks
+st_callback:
+  _target_: src.util.Callback
+  gap: 0.001
+  # soft_limit: 1
+  time_limit: 10
+lt_callback:
+  _target_: src.util.Callback
+  gap: 0.001
+  # soft_limit: 1
+  time_limit: 30
+  time_limit_is_hard: False  # Only stops if any solution is found
+
+# Other
+lt_relax: False
+outlook_relax: True
+
+# Gurobi logging
+st_silent: True
+lt_silent: False

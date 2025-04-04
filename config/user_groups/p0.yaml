@@ -1,0 +1,10 @@
+name: p0
+groups:
+  - name: best-effort
+    weight: 1
+    slo_lower:
+      bad: 1
+      good: 0
+    slo_upper:
+      bad: 0
+      good: 1

@@ -1,0 +1,10 @@
+name: p100
+groups:
+  - name: premium
+    weight: 1
+    slo_lower:
+      bad: 0
+      good: 1
+    slo_upper:
+      bad: 0
+      good: 1

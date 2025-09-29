@@ -1,3 +1,12 @@
+"""High level optimization strategies.
+
+The module exposes two entry points: :class:`Qt` performs a single optimization
+over the full horizon, while :class:`QtOnline` orchestrates rolling horizon
+optimization with optional long-term planning and outlook generation.  The goal
+of this file is to document the control flow that wires together forecasting,
+optimization, and fallback heuristics.
+"""
+
 from time import time
 from typing import Optional
 
@@ -11,8 +20,14 @@ from src.util import Callback, extract_a, extract_d
 
 
 class Qt:
+    """Convenience wrapper around :class:`src.qt_model.QtModel`.
+
+    The class exists to expose a consistent API between the offline and the
+    online optimizer.  It mainly handles default arguments and result
+    serialization.
+    """
+
     def __init__(self, callback: Optional[Callback] = None, silent: bool = False, relax: bool = False):
-        """Global optimization model."""
         self.callback = callback
         self.silent = silent
         self.relax = relax
@@ -26,29 +41,61 @@ class Qt:
             result.append("relax")
         return f"Qt({','.join(result)})"
 
-    def minimize_emissions(self,
-                           scenario: Scenario,
-                           qor_target: float,
-                           R_hat: Optional[np.array] = None,
-                           C_hat: Optional[np.array] = None,
-                           info: Optional[dict] = None) -> Result:
+    def minimize_emissions(
+        self,
+        scenario: Scenario,
+        qor_target: float,
+        R_hat: Optional[np.ndarray] = None,
+        C_hat: Optional[np.ndarray] = None,
+        info: Optional[dict] = None,
+    ) -> Result:
+        """Solve for the lowest emissions while maintaining ``qor_target``."""
+
         R_hat = R_hat if R_hat is not None else scenario.R
         C_hat = C_hat if C_hat is not None else scenario.C
         qt_model = QtModel(scenario, silent=self.silent, callback=self.callback)
-        metrics = qt_model.minimize_emissions(qor_target, window=scenario.I, R_hat=R_hat, C_hat=C_hat, relax=self.relax)
+        metrics = qt_model.minimize_emissions(
+            qor_target,
+            window=scenario.I,
+            R_hat=R_hat,
+            C_hat=C_hat,
+            relax=self.relax,
+        )
         info = info if info is not None else {}
         info["qor_target"] = qor_target
-        return Result(extract_a(qt_model.a_), extract_d(qt_model.d_),
-                      optimizer=self, scenario=scenario, metrics=metrics, info=info)
+        return Result(
+            extract_a(qt_model.a_),
+            extract_d(qt_model.d_),
+            optimizer=self,
+            scenario=scenario,
+            metrics=metrics,
+            info=info,
+        )
 
     def maximize_qor(self, scenario: Scenario, budget: float) -> Result:
+        """Maximize the minimum QoR while respecting an emission budget."""
+
         qt_model = QtModel(scenario, silent=self.silent, callback=self.callback)
-        metrics = qt_model.maximize_qor(budget, window=scenario.I, R_hat=scenario.R, C_hat=scenario.C, relax=self.relax)
-        return Result(extract_a(qt_model.a_), extract_d(qt_model.d_),
-                      optimizer=self, scenario=scenario, metrics=metrics, info={"budget": budget})
+        metrics = qt_model.maximize_qor(
+            budget,
+            window=scenario.I,
+            R_hat=scenario.R,
+            C_hat=scenario.C,
+            relax=self.relax,
+        )
+        return Result(
+            extract_a(qt_model.a_),
+            extract_d(qt_model.d_),
+            optimizer=self,
+            scenario=scenario,
+            metrics=metrics,
+            info={"budget": budget},
+        )
 
 
 class QtOnline:
+    """Rolling horizon optimizer that mixes short- and long-term planning."""
+
     def __init__(self,
                  horizon: int,
                  oracle: bool,
@@ -104,9 +151,13 @@ class QtOnline:
         return f"QtOnline({','.join(result)})"
 
     def minimize_emissions(self, scenario: Scenario, qor_target: float) -> Result:
+        """Entry point for emission minimization with short-term corrections."""
+
         return self._optimize(scenario, qor_target=qor_target)
 
     def maximize_qor(self, scenario: Scenario, budget: float) -> Result:
+        """Entry point for QoR maximization when a fixed budget is available."""
+
         return self._optimize(scenario, budget=budget)
 
     def _optimize(self, scenario: Scenario, qor_target: float = None, budget: float = None) -> Result:
@@ -161,6 +212,7 @@ class QtOnline:
                 outlooks=outlooks,
             )
 
+            # Replace the forecasts with the ground truth values we now observe.
             R_hat[i] = scenario.R[i]
             C_hat[i] = scenario.C[i]
 
@@ -353,17 +405,25 @@ class QtOnline:
         while True:
             try:
                 metrics = online_model.minimize_emissions(qor_target, window=window, R_hat=R_hat, C_hat=C_hat)
-                print(f"{i:<4}: "
-                      f"QoR: {metrics['qor_target']:.3f}, "
-                      f"Runtime: {metrics['runtime']:.3f}s, "
-                      f"Gap: {metrics['mip_gap']:.3f}, "
-                      f"Status: {metrics['optimization_status']}")
+                print(
+                    f"{i:<4}: "
+                    f"QoR: {metrics['qor_target']:.3f}, "
+                    f"Runtime: {metrics['runtime']:.3f}s, "
+                    f"Gap: {metrics['mip_gap']:.3f}, "
+                    f"Status: {metrics['optimization_status']}"
+                )
 
                 a_act, d_act = perform_step(i, online_model.d_, online_model.a_, scenario)
-                assert np.isclose(a_act.sum(), scenario.R[i].sum()), f"Sanity check: All requests should be served, but allocated {a_act.sum()} of {scenario.R[i].sum()}"
+                assert np.isclose(
+                    a_act.sum(), scenario.R[i].sum()
+                ), f"Sanity check: All requests should be served, but allocated {a_act.sum()} of {scenario.R[i].sum()}"
                 break
             except RuntimeError:
                 if retry:
+                    # If we already spent the entire budget for the step we try
+                    # again with a slightly relaxed QoR target.  This mirrors
+                    # the original behaviour where the short-term solver would
+                    # repeatedly degrade the QoR until feasible.
                     qor_target *= 0.95
                     continue
                 print("No solution found, allocating all to best model")
@@ -379,6 +439,8 @@ class QtOnline:
 
 
 def perform_step(i: int, d_: np.array, a_: np.array, scenario: Scenario) -> tuple[np.array, np.array]:
+    """Extract the integer decisions for allocations and deployments at step ``i``."""
+
     d_act = np.array([[int(round(d_[i, q, m].X)) for m in scenario.M] for q in scenario.Q])
     a_act = np.array([[a_[i, u, q].X for q in scenario.Q] for u in scenario.U])
     return a_act, d_act

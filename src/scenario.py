@@ -1,3 +1,5 @@
+"""Scenario definitions and data loading helpers."""
+
 import os
 from datetime import timedelta
 from typing import Literal, Optional
@@ -5,12 +7,12 @@ from typing import Literal, Optional
 import hydra
 import numpy as np
 import pandas as pd
-from hydra import initialize, compose
+from hydra import compose, initialize
 
-from src.forecasting import load_prophet_forecast, generate_carbon_cast_96hrs
+from src.forecasting import generate_carbon_cast_96hrs, load_prophet_forecast
 from src.util import DT_INDEX
 
-_DATA_DIR = os.path.join(os.path.dirname(__file__), '../data')
+_DATA_DIR = os.path.join(os.path.dirname(__file__), "../data")
 
 
 class Scenario:
@@ -61,29 +63,47 @@ class Scenario:
 
     @property
     def name(self) -> str:
+        """Return a descriptive identifier used in file names and logs."""
+
         return f"{self.requests_dataset},{self.region},{self.user_groups_scenario},vp={self.vp}"
 
     @classmethod
     def from_config(cls, cfg):
-        return cls(seed=cfg.seed,
-                   requests_dataset=cfg.requests_dataset,
-                   region=cfg.region,
-                   vp=cfg.vp,
-                   user_groups_scenario=cfg.user_groups["name"],
-                   user_groups=cfg.user_groups["groups"],
-                   model_qualities=cfg.model_qualities,
-                   machines=cfg.machines)
+        """Create a scenario directly from a Hydra configuration object."""
+
+        return cls(
+            seed=cfg.seed,
+            requests_dataset=cfg.requests_dataset,
+            region=cfg.region,
+            vp=cfg.vp,
+            user_groups_scenario=cfg.user_groups["name"],
+            user_groups=cfg.user_groups["groups"],
+            model_qualities=cfg.model_qualities,
+            machines=cfg.machines,
+        )
 
     @classmethod
     def from_name(cls, name: str):
+        """Load a scenario by parsing the string returned from :attr:`name`."""
+
         requests_dataset, region, user_group_scenario, vp_str = name.split(",")
         vp = vp_str.split("=")[1]
         with initialize(version_base=None, config_path="../config"):
-            cfg = compose(config_name="config", overrides=[f"requests_dataset={requests_dataset}", f"region={region}", f"user_groups={user_group_scenario}", f"vp={vp}"])
+            cfg = compose(
+                config_name="config",
+                overrides=[
+                    f"requests_dataset={requests_dataset}",
+                    f"region={region}",
+                    f"user_groups={user_group_scenario}",
+                    f"vp={vp}",
+                ],
+            )
         return cls.from_config(cfg)
 
     @property
     def K(self) -> np.array:
+        """Return a matrix of machine throughput indexed by quality and machine."""
+
         return np.array([[self.machines[m].performance[q] for m in self.M] for q in self.Q])
 
     def _build_slo_matrix(self, user_groups: list[dict], key: str) -> np.ndarray:
@@ -107,6 +127,8 @@ class Scenario:
         return matrix
 
     def generate_R_hat(self, i: int, kind: Literal["oracle", "yhat", "yhat_lower", "yhat_upper"]) -> np.array:
+        """Generate a demand forecast starting from interval ``i``."""
+
         # TODO implement multiple users
         R = np.copy(self.R)
         if kind == "oracle":
@@ -138,6 +160,8 @@ class Scenario:
         return R
 
     def generate_C_hat(self, i: int, kind: Literal["oracle", "yhat"]) -> np.array:
+        """Return a carbon intensity outlook starting at step ``i``."""
+
         C = np.copy(self.C)
         if kind == "oracle":
             return C
@@ -152,6 +176,8 @@ class Scenario:
 
 
 class Machine:
+    """Description of a deployable hardware configuration."""
+
     def __init__(self,
                  name: str,
                  performance: dict[str, float],
@@ -207,13 +233,12 @@ class Machine:
         return normalized
 
 
-def load_requests(dataset: str, weights: Optional[list[float]] = None) -> tuple[np.array, pd.DataFrame, float]:
-    """Load request dataset.
+def load_requests(dataset: str, weights: Optional[list[float]] = None) -> tuple[np.ndarray, pd.DataFrame, float]:
+    """Load the request dataset and normalise it for numerical stability."""
 
     # TODO implement multiple users
     # TODO explain weights
     # TODO remove power!!
-    """
     if "static" in dataset:  # e.g. static_e6
         if "_e" in dataset:
             power = int(dataset.split("_e")[1])
@@ -243,6 +268,8 @@ def load_requests(dataset: str, weights: Optional[list[float]] = None) -> tuple[
 
 
 def load_carbon_intensity(region: str):
+    """Load carbon intensity data for ``region`` and return scaled values."""
+
     # adding artificial 2020 bc we do not yet have the data
     _2020 = pd.read_csv(f'{_DATA_DIR}/electricitymaps/{region}_2021_hourly.csv', index_col=0, parse_dates=True)
     _2020.index = _2020.index - timedelta(days=365)

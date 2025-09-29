@@ -1,7 +1,6 @@
 from time import time
 from typing import Optional
 
-import gurobipy as gp
 import numpy as np
 
 from src.executor import execute_perfect_step
@@ -9,8 +8,6 @@ from src.qt_model import QtModel
 from src.result import Result
 from src.scenario import Scenario
 from src.util import Callback, extract_a, extract_d
-
-sum_ = gp.quicksum
 
 
 class Qt:

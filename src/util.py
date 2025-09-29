@@ -1,24 +1,11 @@
 from datetime import timedelta
 from typing import Optional
 
-import gurobipy as gp
 import numpy as np
 import pandas as pd
-from gurobipy import GRB
+from pulp import LpVariable, value
 
 DT_INDEX = pd.date_range("2023-01-01 00:00:00", "2023-12-31 23:00:00", freq="h")
-
-
-class GurobiEnv:
-    _value = None
-
-    @classmethod
-    def get_env(cls):
-        if cls._value is None:
-            cls._value = gp.Env(params={"OutputFlag": 0})
-        return cls._value
-
-
 def lt_indices(frequency: int) -> list[bool]:
     """Returns a list of boolean values indicating the indices for long-term optimization."""
     # Create a series of dates to match DT_INDEX and resample by the provided frequency
@@ -38,13 +25,11 @@ class Callback:
                  soft_limit: int = 0,
                  time_limit: Optional[int] = None,
                  time_limit_is_hard: bool = True):
-        """Gurobi callback for stopping MIP solver
+        """Placeholder callback for compatibility with legacy interfaces.
 
-        Args:
-            gap: MIP gap between the best solution and bound
-            soft_limit: Minimum time to solve, even if already below gap. Ignored if no gap specified.
-            time_limit: Maximum time to solve
-            time_limit_is_hard: If False, only stops if a solution is found
+        The open-source CBC solver used by PuLP does not expose the same callback
+        API as Gurobi. The parameters are stored to keep backward compatibility,
+        and the callable returned by ``__call__`` is a no-op.
         """
         self.gap = gap
         self.soft_limit = soft_limit
@@ -52,8 +37,6 @@ class Callback:
         self.time_limit_is_hard = time_limit_is_hard
         self.metrics = []
         self.optimization_status = "OPTIMAL"
-        self._lowest_objbst = np.inf
-        self._highest_objbnd = 0
 
     def __str__(self):
         result = []
@@ -66,72 +49,32 @@ class Callback:
         return ",".join(result)
 
     def __call__(self):
-        """"""
-        def callback(model, where):
-            if (self.gap or self.time_limit is not None) and where == GRB.Callback.MIP:
-                self.optimization_status = "OPTIMAL"
-                runtime = model.cbGet(GRB.Callback.RUNTIME)
-                work = model.cbGet(GRB.Callback.WORK)
-                objbst = model.cbGet(GRB.Callback.MIP_OBJBST)
-                objbnd = model.cbGet(GRB.Callback.MIP_OBJBND)
-                gap = _mip_gap(objbst, objbnd)
+        def callback(*_args, **_kwargs):
+            return None
 
-                if objbst < self._lowest_objbst or objbnd > self._highest_objbnd:
-                    self.metrics.append({
-                        "runtime": runtime,
-                        "work": work,
-                        "objbst": objbst if objbst < GRB.INFINITY else np.inf,
-                        "objbnd": objbnd,
-                        "gap": gap,
-                    })
-                    self._lowest_objbst = objbst
-                    self._highest_objbnd = objbst
-
-                # Stop if hard time limit is reached
-                is_above_time_limit = self.time_limit is not None and runtime > self.time_limit
-                is_valid_solution = objbst < GRB.INFINITY
-                if is_above_time_limit and (self.time_limit_is_hard or is_valid_solution):
-                    print(f"Callback: Time limit of {self.time_limit:.3f} seconds reached at gap {self.gap}.")
-                    self.optimization_status = "TIME_LIMIT"
-                    model.terminate()
-                    return
-
-                # Stop if there is a valid solution within gap after soft limit has passed
-                is_above_soft_limit = runtime >= self.soft_limit
-                is_below_mip_gap = gap < self.gap
-                if is_valid_solution and is_above_soft_limit and is_below_mip_gap:
-                    print(f"Callback: Gap of {self.gap} reached after {runtime:.3f} seconds.")
-                    self.optimization_status = "GAP"
-                    model.terminate()
-                    return
         return callback
 
 
-def _mip_gap(objbst: float, objbnd: float) -> float:
-    try:
-        return abs(objbst - objbnd) / abs(objbst)
-    except ZeroDivisionError:
-        return np.inf
-
-
 def extract_a(a: np.array) -> np.array:
-    return _extract_gurobi_vars(a)
+    return _extract_solver_vars(a)
 
 
 def extract_d(d: np.array) -> np.array:
-    return np.rint(_extract_gurobi_vars(d))
+    return np.rint(_extract_solver_vars(d))
 
 
-def _extract_gurobi_vars(vec: np.array) -> np.array:
-    """Extracts Gurobi variables."""
-    vfunc = np.vectorize(_extract_if_gurobi)
+def _extract_solver_vars(vec: np.array) -> np.array:
+    """Extracts decision variable values from the underlying solver."""
+    vfunc = np.vectorize(_extract_if_solver)
     x = vfunc(vec)
     return x
 
 
-def _extract_if_gurobi(var):
-    if isinstance(var, gp.Var):
-        return var.X
+def _extract_if_solver(var):
+    if isinstance(var, LpVariable):
+        return value(var)
+    if var is None:
+        return 0
     return var
 
 

@@ -110,101 +110,188 @@ class QtOnline:
         return self._optimize(scenario, budget=budget)
 
     def _optimize(self, scenario: Scenario, qor_target: float = None, budget: float = None) -> Result:
+        """Shared entry point for maximizing QoR or minimizing emissions.
+
+        The method orchestrates the interaction between long-term planning, optional
+        outlook generation, and short-term corrective actions.  The original
+        implementation grew organically and was difficult to follow because the
+        responsibilities of each block were intertwined.  The refactored version
+        delegates small, well defined steps to helper methods which makes the
+        control flow clearer and easier to maintain.
+        """
+
         horizon = min(self.horizon, scenario.vp)
+        online_model = QtModel(scenario, silent=self.st_silent, callback=self.st_callback)
+        long_term_params = self._prepare_long_term_params(budget, qor_target)
+        R_hat, C_hat = self._initialize_forecasts(scenario)
+
+        print("Starting online budget optimization...")
 
         t0 = time()
-        st_metrics = {}
-
-        online_model = QtModel(scenario, silent=self.st_silent, callback=self.st_callback)
-
-        d_sts = []
-        d_acts = []
-        qor_target_history = {}
-        outlooks = {}
-
-        # Init forecasts in case of oracle
-        C_hat = scenario.C
-        R_hat = scenario.R
-
-        if budget:
-            long_term_params = {"budget": budget, "past_vps": False}
-        else:
-            long_term_params = {"qor_target": qor_target}
-
         retry_lt = False
-        print("Starting online budget optimization...")
-        last_qor_target = None
+        last_qor_target: Optional[float] = None
+        qor_target_history: dict[int, float] = {}
+        outlooks: dict[int, dict] = {}
+
         for i in scenario.I:
             print(f"{i:<4} ------------------------")
-            if i % self.lt_frequency == 0:
-                C_hat = scenario.generate_C_hat(i, kind="yhat" if not self.oracle else "oracle")
-                R_hat = scenario.generate_R_hat(i, kind="yhat" if not self.oracle else "oracle")
+            if self._should_update_forecasts(i):
+                R_hat, C_hat = self._generate_new_forecasts(scenario, i)
 
-            if i % self.lt_frequency == 0 or retry_lt:
-                window = scenario.I[i:]
+            qor_target, retry_lt, last_qor_target = self._maybe_run_long_term_optimization(
+                scenario=scenario,
+                online_model=online_model,
+                window=scenario.I[i:],
+                R_hat=R_hat,
+                C_hat=C_hat,
+                params=long_term_params,
+                step=i,
+                retry=retry_lt,
+                budget=budget,
+                qor_target=qor_target,
+                last_qor_target=last_qor_target,
+                qor_target_history=qor_target_history,
+            )
 
-                try:
-                    # TODO
-                    # print(f"Long-term optimization {experiment_name}...", flush=True)
-                    print(f"Long-term optimization ...", flush=True)
-                    lt_result = self._long_term_optimization(R_hat, C_hat, scenario, online_model,
-                                                             window=window,
-                                                             relax=self.lt_relax,
-                                                             **long_term_params)
-                    retry_lt = False
-
-                    if budget:  # TODO special case
-                        qor_target = lt_result.metrics["qor_target"]
-                        if last_qor_target is not None:
-                            if qor_target < last_qor_target * 0.95:
-                                qor_target = last_qor_target * 0.95
-                            elif qor_target > last_qor_target * 1.05:
-                                qor_target = last_qor_target * 1.05
-                        last_qor_target = qor_target
-                        qor_target_history[i] = qor_target
-                        print(f"Current min QoR: {qor_target:.3f} at {lt_result.metrics['emissions']} tCO2e")
-                except RuntimeError:
-                    # The long-term optimization can fail if passed time steps make it impossible to reach the QoR
-                    # In this case, we run a short-term optimization which will opt for an optimal solution
-                    # and retry the long-term optimization in the next round
-                    print("Long-term optimization failed, retrying next round")
-                    retry_lt = True
-
-            # Outlooks
-            if self.outlook_frequency and i % self.outlook_frequency == 0:
-                R_hat_lower = scenario.generate_R_hat(i, kind="yhat_lower")
-                R_hat_upper = scenario.generate_R_hat(i, kind="yhat_upper")
-                outlook = {}
-                for outlook_type, R_i in [("expected", R_hat), ("worst case", R_hat_lower), ("best case", R_hat_upper)]:
-                    outlook[outlook_type] = {}
-                    for qor in [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1]:
-                        print(f"Outlook {outlook_type} {qor} ...")
-                        outlook[outlook_type][qor] = self._emissions_outlook(i, R_i, C_hat, scenario, qor)
-                outlooks[i] = outlook
+            outlooks = self._maybe_generate_outlooks(
+                scenario=scenario,
+                step=i,
+                R_hat=R_hat,
+                C_hat=C_hat,
+                outlooks=outlooks,
+            )
 
             R_hat[i] = scenario.R[i]
             C_hat[i] = scenario.C[i]
 
-            self._short_term_optimization(scenario, online_model, qor_target, i, horizon, R_hat, C_hat, retry=(budget is not None))
-            # st_metrics[i] = metrics
+            self._short_term_optimization(
+                scenario,
+                online_model,
+                qor_target,
+                i,
+                horizon,
+                R_hat,
+                C_hat,
+                retry=(budget is not None),
+            )
 
-        # TODO bit dirty
-        if "past_vps" in long_term_params:
-            del long_term_params["past_vps"]
+        metrics = self._build_metrics(t0, qor_target_history, outlooks)
+        info = self._sanitize_long_term_params(long_term_params)
+        return Result(online_model.a_, online_model.d_, optimizer=self, scenario=scenario, metrics=metrics, info=info)
 
-        metrics = {
-            "runtime": time() - t0,
-            # "lt_metrics": lt_metrics,
-            # "st_metrics": st_metrics,
-            # "d_lts": np.array(d_lts),
-            # "d_sts": np.array(d_sts),
-            # "d_acts": np.array(d_acts),
-        }
+    def _prepare_long_term_params(self, budget: Optional[float], qor_target: Optional[float]) -> dict:
+        if budget is not None:
+            return {"budget": budget, "past_vps": False}
+        return {"qor_target": qor_target}
+
+    def _initialize_forecasts(self, scenario: Scenario) -> tuple[np.ndarray, np.ndarray]:
+        """Return mutable copies of the scenario demand and carbon data."""
+        return scenario.R.copy(), scenario.C.copy()
+
+    def _should_update_forecasts(self, step: int) -> bool:
+        return step % self.lt_frequency == 0
+
+    def _generate_new_forecasts(self, scenario: Scenario, step: int) -> tuple[np.ndarray, np.ndarray]:
+        """Generate new forecast arrays for the current long-term step."""
+
+        kind = "oracle" if self.oracle else "yhat"
+        C_hat = scenario.generate_C_hat(step, kind=kind)
+        R_hat = scenario.generate_R_hat(step, kind=kind)
+        return R_hat, C_hat
+
+    def _maybe_run_long_term_optimization(
+        self,
+        *,
+        scenario: Scenario,
+        online_model: QtModel,
+        window: list[int],
+        R_hat: np.ndarray,
+        C_hat: np.ndarray,
+        params: dict,
+        step: int,
+        retry: bool,
+        budget: Optional[float],
+        qor_target: Optional[float],
+        last_qor_target: Optional[float],
+        qor_target_history: dict[int, float],
+    ) -> tuple[Optional[float], bool, Optional[float]]:
+        if not (self._should_update_forecasts(step) or retry):
+            return qor_target, False, last_qor_target
+
+        try:
+            print("Long-term optimization ...", flush=True)
+            lt_result = self._long_term_optimization(
+                R_hat,
+                C_hat,
+                scenario,
+                online_model,
+                window=window,
+                relax=self.lt_relax,
+                **params,
+            )
+            retry = False
+        except RuntimeError:
+            print("Long-term optimization failed, retrying next round")
+            return qor_target, True, last_qor_target
+
+        if budget is not None:
+            qor_target = lt_result.metrics["qor_target"]
+            if last_qor_target is not None:
+                qor_target = self._smooth_qor_target(qor_target, last_qor_target)
+            last_qor_target = qor_target
+            qor_target_history[step] = qor_target
+            print(f"Current min QoR: {qor_target:.3f} at {lt_result.metrics['emissions']} tCO2e")
+
+        return qor_target, retry, last_qor_target
+
+    def _smooth_qor_target(self, new_target: float, previous_target: float) -> float:
+        lower_bound = previous_target * 0.95
+        upper_bound = previous_target * 1.05
+        return min(max(new_target, lower_bound), upper_bound)
+
+    def _maybe_generate_outlooks(
+        self,
+        *,
+        scenario: Scenario,
+        step: int,
+        R_hat: np.ndarray,
+        C_hat: np.ndarray,
+        outlooks: dict[int, dict],
+    ) -> dict[int, dict]:
+        if not self.outlook_frequency or step % self.outlook_frequency != 0:
+            return outlooks
+
+        R_hat_lower = scenario.generate_R_hat(step, kind="yhat_lower")
+        R_hat_upper = scenario.generate_R_hat(step, kind="yhat_upper")
+
+        outlook = {}
+        for outlook_type, R_i in [("expected", R_hat), ("worst case", R_hat_lower), ("best case", R_hat_upper)]:
+            outlook[outlook_type] = {}
+            for qor in [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1]:
+                print(f"Outlook {outlook_type} {qor} ...")
+                outlook[outlook_type][qor] = self._emissions_outlook(step, R_i, C_hat, scenario, qor)
+
+        outlooks[step] = outlook
+        return outlooks
+
+    def _build_metrics(
+        self,
+        start_time: float,
+        qor_target_history: dict[int, float],
+        outlooks: dict[int, dict],
+    ) -> dict:
+        metrics = {"runtime": time() - start_time}
         if qor_target_history:
             metrics["qor_target_history"] = qor_target_history
         if outlooks:
             metrics["outlooks"] = outlooks
-        return Result(online_model.a_, online_model.d_, optimizer=self, scenario=scenario, metrics=metrics, info=long_term_params)
+        return metrics
+
+    @staticmethod
+    def _sanitize_long_term_params(params: dict) -> dict:
+        info = dict(params)
+        info.pop("past_vps", None)
+        return info
 
     def _emissions_outlook(self, i: int, R_hat, C_hat, scenario, qor_target) -> float:
         outlook_model = QtModel(scenario, silent=self.lt_silent, callback=self.lt_callback)

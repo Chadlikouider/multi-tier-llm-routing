@@ -137,6 +137,15 @@ class QtModel:
         if self.callback:
             metrics["callback"] = self.callback.metrics
             metrics["optimization_status"] = self.callback.optimization_status
+        else:
+            # ``QtOnline`` expects the metrics dictionary to expose an
+            # ``optimization_status`` field regardless of whether we used a
+            # callback.  The Gurobi-backed implementation filled this field,
+            # whereas the simplified PuLP code only reported ``status``.  The
+            # mismatch caused a ``KeyError`` when printing diagnostics from the
+            # short-term optimizer.  Fall back to the solver status so the
+            # public API stays consistent with the historical behaviour.
+            metrics["optimization_status"] = metrics["status"]
         return metrics
 
 

@@ -31,16 +31,27 @@ class Scenario:
 
         self.user_groups_scenario = user_groups_scenario
         self.user_group_weights = [u["weight"] for u in user_groups]
-        # assert sum(self.user_group_weights) == 1, "Weights of user groups must sum to 1"
-        self.slo_lower = np.array([list(u["slo_lower"].values()) for u in user_groups])  # TODO sort according to model_qualities
-        self.slo_upper = np.array([list(u["slo_upper"].values()) for u in user_groups])  # TODO sort according to model_qualities
+
+        self.model_qualities = model_qualities
+        self.quality_to_index = {quality: idx for idx, quality in enumerate(model_qualities)}
+
+        self.slo_lower = self._build_slo_matrix(user_groups, "slo_lower")
+        self.slo_upper = self._build_slo_matrix(user_groups, "slo_upper")
 
         self.vp = vp
         self.C, self.C_raw = load_carbon_intensity(region)
         self.R, self.R_raw, request_scaling_factor = load_requests(requests_dataset, weights=self.user_group_weights)
         self.request_scaling_factor = request_scaling_factor
 
-        self.machines = {i: hydra.utils.instantiate(m, request_scaling_factor=request_scaling_factor) for i, m in enumerate(machines)}
+        self.machines = {
+            i: hydra.utils.instantiate(
+                m,
+                request_scaling_factor=request_scaling_factor,
+                quality_to_index=self.quality_to_index,
+                quality_count=len(self.model_qualities),
+            )
+            for i, m in enumerate(machines)
+        }
 
         self.U = list(range(len(user_groups)))
         self.Q = list(range(len(model_qualities)))
@@ -74,6 +85,26 @@ class Scenario:
     @property
     def K(self) -> np.array:
         return np.array([[self.machines[m].performance[q] for m in self.M] for q in self.Q])
+
+    def _build_slo_matrix(self, user_groups: list[dict], key: str) -> np.ndarray:
+        matrix = np.zeros((len(user_groups), len(self.model_qualities)))
+        expected_keys = set(self.model_qualities)
+        for user_idx, user_group in enumerate(user_groups):
+            slo_values = user_group.get(key, {})
+            missing = expected_keys - set(slo_values)
+            if missing:
+                missing_str = ", ".join(sorted(missing))
+                raise ValueError(
+                    f"User group '{user_group.get('name', user_idx)}' is missing QoR targets for: {missing_str}"
+                )
+            for quality, value in slo_values.items():
+                if quality not in self.quality_to_index:
+                    raise ValueError(
+                        f"Unknown model quality '{quality}' referenced in {key} for user group "
+                        f"'{user_group.get('name', user_idx)}'"
+                    )
+                matrix[user_idx, self.quality_to_index[quality]] = value
+        return matrix
 
     def generate_R_hat(self, i: int, kind: Literal["oracle", "yhat", "yhat_lower", "yhat_upper"]) -> np.array:
         # TODO implement multiple users
@@ -129,9 +160,17 @@ class Machine:
                  power_usage: Optional[float] = None,
                  idle_power_usage: Optional[float] = None,
                  max_power_usage: Optional[list[float]] = None,
-                 pue: int = 1):
+                 pue: int = 1,
+                 quality_to_index: Optional[dict[str, int]] = None,
+                 quality_count: Optional[int] = None):
         self.name = name
-        self.performance = {i: v * request_scaling_factor for i, v in enumerate(performance.values())}
+        self.performance = self._normalize_performance(
+            name,
+            performance,
+            request_scaling_factor,
+            quality_to_index,
+            quality_count,
+        )
         self.embedded_carbon = embedded_carbon / 1000000  # gCO₂eq to tCO₂eq
 
         # load-independent power model
@@ -148,6 +187,24 @@ class Machine:
 
     def load_dependent_power_usage(self, q, util: float, n: float = 1) -> float:
         return self._pue * (self._idle_power_usage + (self._max_power_usage[q] - self._idle_power_usage) * util ** n)
+
+    @staticmethod
+    def _normalize_performance(machine_name: str,
+                                performance: dict[str, float],
+                                request_scaling_factor: float,
+                                quality_to_index: Optional[dict[str, int]],
+                                quality_count: Optional[int]) -> list[float]:
+        if quality_to_index is None or quality_count is None:
+            return [v * request_scaling_factor for v in performance.values()]
+
+        normalized = [0.0] * quality_count
+        for quality, throughput in performance.items():
+            if quality not in quality_to_index:
+                raise ValueError(
+                    f"Performance specified for unknown quality '{quality}' on machine '{machine_name}'"
+                )
+            normalized[quality_to_index[quality]] = throughput * request_scaling_factor
+        return normalized
 
 
 def load_requests(dataset: str, weights: Optional[list[float]] = None) -> tuple[np.array, pd.DataFrame, float]:

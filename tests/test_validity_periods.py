@@ -1,5 +1,7 @@
 import pytest
 
+pytest.importorskip("pulp")
+
 from src.util import get_validity_periods
 
 

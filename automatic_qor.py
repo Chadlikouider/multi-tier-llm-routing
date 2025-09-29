@@ -11,7 +11,7 @@ import numpy as np
 
 np.float_ = np.float64
 
-logger = logging.getLogger("gurobipy")
+logger = logging.getLogger("pulp")
 logger.propagate = False
 
 

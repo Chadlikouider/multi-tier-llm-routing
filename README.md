@@ -80,9 +80,9 @@ If a result already exists, it is skipped automatically using `src.result.result
 
 Each optimizer exposes both emission minimization and quality maximization interfaces:
 - `Qt.minimize_emissions` solves a global optimization over the full horizon.
-- `QtOnline.minimize_emissions` alternates short- and long-term optimizations with rolling
-  forecasts of demand and carbon intensity, optionally relaxing integer constraints for
-  lookahead problems.
+- `QtOnline.minimize_emissions` performs rolling short-term optimizations using the
+  latest demand and carbon intensity data, optionally relaxing integer constraints for
+  the active horizon.
 
 To explore additional scenarios you can override the seed, region, machines, QoR targets,
 validity periods, or user group mixes directly from the command line or by editing the
@@ -124,7 +124,7 @@ same schema. When data files are absent the loaders will raise `FileNotFoundErro
 
 ## Forecast caching
 
-Short- and long-term forecasts rely on Facebook Prophet. Generated forecasts are cached under
+Short-term forecasts rely on Facebook Prophet. Generated forecasts are cached under
 `cache/` to speed up repeated runs (`src.forecasting.load_prophet_forecast`). You can delete
 this directory to force regeneration, or pre-populate it to share cached forecasts across runs.
 

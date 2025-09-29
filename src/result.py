@@ -1,3 +1,5 @@
+"""Utility helpers for working with solver results."""
+
 import os
 import pickle
 from typing import Optional
@@ -12,13 +14,17 @@ _BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 
 
 class Result:
-    def __init__(self,
-                 a: np.array,
-                 d: np.array,
-                 optimizer: Optional["src.optimizer.Optimizer"] = None,
-                 scenario: Optional[Scenario] = None,
-                 metrics: dict = None,
-                 info: dict = None):  # infos are reflected in the name
+    """Container storing allocations, deployments, and derived metrics."""
+
+    def __init__(
+        self,
+        a: np.ndarray,
+        d: np.ndarray,
+        optimizer: Optional["src.optimizer.Optimizer"] = None,
+        scenario: Optional[Scenario] = None,
+        metrics: Optional[dict] = None,
+        info: Optional[dict] = None,
+    ):
         self.a = a.astype(np.float64)  # t, u, q
         self.d = d.astype(np.float64)  # t, q, m
         self.optimizer = optimizer
@@ -26,65 +32,115 @@ class Result:
         self.metrics = metrics if metrics is not None else {}
         self.info = info if info is not None else {}
 
-        # Cache
+        # Cache the QoR list to avoid recomputing expensive aggregations.
         self._qor_list = None
 
     @property
-    def name(self):
+    def name(self) -> str:
+        """Return a stable, human-readable identifier for persistence."""
+
         return get_result_name(self.scenario, self.optimizer, self.info)
 
-    def emissions_over_time(self, C_hat: Optional[np.array] = None, load_dependent: bool = False):
+    def emissions_over_time(self, C_hat: Optional[np.ndarray] = None, load_dependent: bool = False) -> np.ndarray:
+        """Return hourly emissions using either actual or forecasted carbon data."""
+
         C = C_hat if C_hat is not None else self.scenario.C
-        return np.array([
+        return np.array(
             [
-                interval_emissions(i, q, m, self.d, self.scenario, C, load_dependent=load_dependent, a_=self.a)
-                for q in self.scenario.Q
-                for m in self.scenario.M
-            ] for i in self.scenario.I
-        ]).sum(axis=1)
+                [
+                    interval_emissions(i, q, m, self.d, self.scenario, C, load_dependent=load_dependent, a_=self.a)
+                    for q in self.scenario.Q
+                    for m in self.scenario.M
+                ]
+                for i in self.scenario.I
+            ]
+        ).sum(axis=1)
 
-    def energy_over_time(self, load_dependent: bool = False):
-        return (self.d.squeeze(axis=-1) * np.array([
-            [
-                interval_power_per_machine(i, q, m, self.d, self.scenario, load_dependent=load_dependent, a_=self.a)
-                for q in self.scenario.Q
-                for m in self.scenario.M
-            ] for i in self.scenario.I
-        ])).sum(axis=1)
+    def energy_over_time(self, load_dependent: bool = False) -> np.ndarray:
+        """Return hourly energy consumption in kWh."""
 
-    def print_stats(self):
+        return (
+            self.d.squeeze(axis=-1)
+            * np.array(
+                [
+                    [
+                        interval_power_per_machine(
+                            i,
+                            q,
+                            m,
+                            self.d,
+                            self.scenario,
+                            load_dependent=load_dependent,
+                            a_=self.a,
+                        )
+                        for q in self.scenario.Q
+                        for m in self.scenario.M
+                    ]
+                    for i in self.scenario.I
+                ]
+            )
+        ).sum(axis=1)
+
+    def print_stats(self) -> None:
+        """Print a compact summary that mirrors the internal dashboards."""
+
         qor_list = self.qor_list()
-        print(f"Actual QoR: min={np.min(qor_list):.3f}, 5th={self.qor_quantile(0.05):.3f}, mean={np.mean(qor_list):.3f}±{np.std(qor_list):.3f} "
-              f"at {self.emissions():.2f} tCO2e")
+        print(
+            "Actual QoR: "
+            f"min={np.min(qor_list):.3f}, "
+            f"5th={self.qor_quantile(0.05):.3f}, "
+            f"mean={np.mean(qor_list):.3f}±{np.std(qor_list):.3f} "
+            f"at {self.emissions():.2f} tCO2e"
+        )
 
-    def emissions(self, i: Optional[int] = None, C_hat: Optional[np.array] = None, load_dependent: bool = False):
-        """Returns the total emissions over time or during a specific interval in gCO2e"""
+    def emissions(
+        self,
+        i: Optional[int] = None,
+        C_hat: Optional[np.ndarray] = None,
+        load_dependent: bool = False,
+    ) -> float:
+        """Return total emissions or emissions for a specific hour in gCO2e."""
+
         z = self.emissions_over_time(C_hat, load_dependent=load_dependent)
         if i is not None:
-            return z[i]
-        else:
-            return z.sum(axis=0)
+            return float(z[i])
+        return float(z.sum(axis=0))
 
     def qor_list(self) -> list[float]:
+        """Return QoR for every validity period of the scenario."""
+
         if self._qor_list is None:
-            self._qor_list = [self._qor(Ti, self.scenario.R) for Ti in get_validity_periods(self.scenario.I, self.scenario.vp)]
+            self._qor_list = [
+                self._qor(Ti, self.scenario.R)
+                for Ti in get_validity_periods(self.scenario.I, self.scenario.vp)
+            ]
         return self._qor_list
 
     def qor_quantile(self, quantile: float) -> float:
-        return np.quantile(self.qor_list(), quantile)
+        """Return a QoR quantile for the cached QoR list."""
+
+        return float(np.quantile(self.qor_list(), quantile))
 
     def qor_target(self) -> float:
-        return np.min(self.qor_list())
+        """Return the minimum QoR, i.e. the objective tracked by the optimizer."""
 
-    def qor_target_forecast(self, R_hat: np.array) -> float:
-        return np.min([self._qor(Ti, R_hat) for Ti in get_validity_periods(self.scenario.I, self.scenario.vp)])
+        return float(np.min(self.qor_list()))
 
-    def _qor(self, validity_period, R_hat=None):
+    def qor_target_forecast(self, R_hat: np.ndarray) -> float:
+        """Compute the QoR target using forecasted demand instead of actual demand."""
+
+        return float(
+            np.min([self._qor(Ti, R_hat) for Ti in get_validity_periods(self.scenario.I, self.scenario.vp)])
+        )
+
+    def _qor(self, validity_period, R_hat=None) -> float:
+        """Return QoR for a specific validity period."""
+
         if R_hat is None:
             R_hat = self.scenario.R
 
         if R_hat[validity_period].sum() == 0:
-            return 1
+            return 1.0
 
         service_levels = self.a[validity_period].sum(axis=0) / R_hat[validity_period].sum(axis=0)
 
@@ -94,17 +150,21 @@ class Result:
         errors = nominator / np.where(denominator == 0, np.inf, denominator)
         highest_error = np.max(errors)
 
-        if 1 < highest_error < 0:
+        if not 0 <= highest_error <= 1:
             raise RuntimeError(f"QoR error out of bounds: {highest_error}")
         return round(1 - highest_error, 3)
 
-    def save(self, result_dir: str = "results"):
+    def save(self, result_dir: str = "results") -> None:
+        """Persist the result object as a pickle file."""
+
         os.makedirs(f"{_BASE_DIR}/{result_dir}", exist_ok=True)
-        path = f'{_BASE_DIR}/{result_dir}/{self.name}.pkl'
-        with open(path, 'wb') as f:
+        path = f"{_BASE_DIR}/{result_dir}/{self.name}.pkl"
+        with open(path, "wb") as f:
             pickle.dump(self.to_dict(), f)
 
-    def to_dict(self):
+    def to_dict(self) -> dict:
+        """Return a JSON-serialisable representation of the result."""
+
         return {
             "a": self.a,
             "d": self.d,
@@ -115,37 +175,53 @@ class Result:
         }
 
     @classmethod
-    def from_dict(cls, d: dict):
-        return cls(a=d["a"], d=d["d"], optimizer=d["optimizer"], metrics=d["metrics"], info=d["info"],
-                   scenario=Scenario.from_name(d["scenario_name"]))
+    def from_dict(cls, d: dict) -> "Result":
+        """Rehydrate a :class:`Result` from :meth:`to_dict` output."""
+
+        return cls(
+            a=d["a"],
+            d=d["d"],
+            optimizer=d["optimizer"],
+            metrics=d["metrics"],
+            info=d["info"],
+            scenario=Scenario.from_name(d["scenario_name"]),
+        )
 
 
 def load_result(name: str, result_dir: str = "results") -> Result:
-    """Supports loading by file name and result name"""
-    if not ".pkl" in name:
-        name = f'{name}.pkl'
-    with open(f'{_BASE_DIR}/{result_dir}/{name}', 'rb') as f:
+    """Load a pickled result either by file name or logical name."""
+
+    if ".pkl" not in name:
+        name = f"{name}.pkl"
+    with open(f"{_BASE_DIR}/{result_dir}/{name}", "rb") as f:
         result = Result.from_dict(pickle.load(f))
     return result
 
 
 def load_results(result_dir: str = "results") -> list[Result]:
-    return [load_result(os.path.basename(filename), result_dir=result_dir)
-            for filename
-            in os.listdir(f"{_BASE_DIR}/{result_dir}")
-            if "pkl" in filename]
+    """Load all results contained in ``result_dir``."""
+
+    return [
+        load_result(os.path.basename(filename), result_dir=result_dir)
+        for filename in os.listdir(f"{_BASE_DIR}/{result_dir}")
+        if "pkl" in filename
+    ]
 
 
-def get_result_name(scenario, optimizer, info):
+def get_result_name(scenario, optimizer, info) -> str:
+    """Build a descriptive file name for a :class:`Result`."""
+
     n = f"{scenario.name}"
-    for k, v in info.items():
-        if isinstance(v, float):
-            v = f"{v:.2f}"
-        n += f",{k}={v}"
+    for key, value in info.items():
+        if isinstance(value, float):
+            value = f"{value:.2f}"
+        n += f",{key}={value}"
     n += f",{optimizer.name},seed={scenario.seed}"
     return n
 
 
-def result_exists(result_name: str, result_dir: str = "results"):
+def result_exists(result_name: str, result_dir: str = "results") -> bool:
+    """Return ``True`` if a pickled result with ``result_name`` exists."""
+
     path = f"{_BASE_DIR}/{result_dir}/{result_name}.pkl"
     return os.path.exists(path)

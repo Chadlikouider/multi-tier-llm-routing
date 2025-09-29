@@ -1,21 +1,27 @@
+"""PuLP model describing the QualityTime optimization problem."""
+
 from time import time
 from typing import Optional
 
 import numpy as np
-from pulp import (LpContinuous,
-                  LpInteger,
-                  LpMaximize,
-                  LpMinimize,
-                  LpProblem,
-                  LpStatus,
-                  LpVariable,
-                  PULP_CBC_CMD,
-                  lpSum,
-                  value)
+from pulp import (
+    LpContinuous,
+    LpInteger,
+    LpMaximize,
+    LpMinimize,
+    LpProblem,
+    LpStatus,
+    LpVariable,
+    PULP_CBC_CMD,
+    lpSum,
+    value,
+)
 
 from src.scenario import Scenario
 from src.util import Callback, get_validity_periods
 
+# Keep a short alias for the sum helper to mirror the PuLP examples and avoid
+# shadowing Python's built-in ``sum``.
 sum_ = lpSum
 
 
@@ -46,7 +52,15 @@ class QtModel:
         validity_periods = get_validity_periods(window, self.scenario.vp, past=past_vps, future=future_vps)
 
         # Set QoR constraint
-        qor = _qor(self.scenario.slo_lower, self.scenario.slo_upper, validity_periods, self.a_, self.scenario, self.model, R=R_hat)
+        qor = _qor(
+            self.scenario.slo_lower,
+            self.scenario.slo_upper,
+            validity_periods,
+            self.a_,
+            self.scenario,
+            self.model,
+            R=R_hat,
+        )
         self.model += qor >= qor_target, "qor_constr"
 
         # Configure model for budget optimization
@@ -88,7 +102,15 @@ class QtModel:
         self.model += emissions <= budget, "budget_constraint"
 
         # Configure model for QoR optimization
-        qor = _qor(self.scenario.slo_lower, self.scenario.slo_upper, validity_periods, self.a_, self.scenario, self.model, R=R_hat)
+        qor = _qor(
+            self.scenario.slo_lower,
+            self.scenario.slo_upper,
+            validity_periods,
+            self.a_,
+            self.scenario,
+            self.model,
+            R=R_hat,
+        )
         self.model += qor
 
         # Optimize
@@ -118,10 +140,16 @@ class QtModel:
         return metrics
 
 
-def _init_variables(model, scenario, R_hat,
-                    window: Optional[list[int]] = None,
-                    relax: bool = False,
-                    add_constraints: bool = True):
+def _init_variables(
+    model: LpProblem,
+    scenario: Scenario,
+    R_hat: np.ndarray,
+    window: Optional[list[int]] = None,
+    relax: bool = False,
+    add_constraints: bool = True,
+):
+    """Create PuLP decision variables and add the structural constraints."""
+
     if window is None:
         window = scenario.I
 
@@ -158,8 +186,14 @@ def _init_variables(model, scenario, R_hat,
 
 
 def _emissions(scenario: Scenario, d_, window, C_hat):
-    """Returns the emissions in gCO2e"""
-    return sum_(interval_emissions(i, q, m, d_, scenario, C_hat) for i in window for q in scenario.Q for m in scenario.M)
+    """Returns the emissions in gCO2e."""
+
+    return sum_(
+        interval_emissions(i, q, m, d_, scenario, C_hat)
+        for i in window
+        for q in scenario.Q
+        for m in scenario.M
+    )
 
 
 def interval_emissions(i, q, m, d_, scenario: Scenario, C_hat, load_dependent=False, a_=None):
@@ -214,11 +248,13 @@ def _qor(slo_lower, slo_upper, validity_periods, a_, scenario, model, R):
 
 
 def _constraint_sufficient_resources(scenario: Scenario, model, a_, d_, i: int):
-    """Ensure deployment can serve all requests for each level"""
+    """Ensure deployment can serve all requests for each level."""
+
     for q in scenario.Q:
         allocated_requests = sum_(a_[i, u, q] for u in scenario.U)
-        servable_requests = sum_(d_[i, q, m] * scenario.machines[m].performance[q]
-                                 for m in scenario.M if d_[i, q, m] is not None)
+        servable_requests = sum_(
+            d_[i, q, m] * scenario.machines[m].performance[q] for m in scenario.M if d_[i, q, m] is not None
+        )
         model += allocated_requests <= servable_requests, f"constraint_sufficient_resources_{i}_{q}"
 
 
@@ -236,6 +272,7 @@ def _constraint_no_wasted_resources(scenario: Scenario, model, a_, d_, i: int):
 
 
 def _constraint_request_allocation(scenario, model, a_, i: int, R):
-    """Ensure all requests are allocated to a level"""
+    """Ensure all requests are allocated to a level."""
+
     for u in scenario.U:
         model += sum_(a_[i, u, q] for q in scenario.Q) == float(R[i, u]), f"constraint_request_allocation_{i}_{u}"

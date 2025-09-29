@@ -1,3 +1,5 @@
+"""Shared helper utilities for the QualityTime project."""
+
 from datetime import timedelta
 from typing import Optional
 
@@ -6,14 +8,17 @@ import pandas as pd
 from pulp import LpVariable, value
 
 DT_INDEX = pd.date_range("2023-01-01 00:00:00", "2023-12-31 23:00:00", freq="h")
+
+
 def lt_indices(frequency: int) -> list[bool]:
-    """Returns a list of boolean values indicating the indices for long-term optimization."""
-    # Create a series of dates to match DT_INDEX and resample by the provided frequency
+    """Return boolean flags marking intervals that start a long-term period."""
+
     dt_series = pd.Series(1, index=DT_INDEX)
 
-    # Get the indices where the start of each period occurs according to the frequency
-    # TODO what is happening here?
-    resampled = dt_series.resample(timedelta(hours=frequency)).apply(lambda x: True).reindex(dt_series.index, fill_value=False)
+    # Resample to the desired frequency and mark the first index of each bucket.
+    resampled = dt_series.resample(timedelta(hours=frequency)).apply(lambda _x: True).reindex(
+        dt_series.index, fill_value=False
+    )
 
     return resampled.tolist()
 
@@ -56,10 +61,14 @@ class Callback:
 
 
 def extract_a(a: np.array) -> np.array:
+    """Extract the allocation variables from a solved PuLP model."""
+
     return _extract_solver_vars(a)
 
 
 def extract_d(d: np.array) -> np.array:
+    """Extract deployment variables and round them to integers."""
+
     return np.rint(_extract_solver_vars(d))
 
 

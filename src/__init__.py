@@ -1,0 +1,1 @@
+"""QualityTime core package."""

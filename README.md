@@ -174,11 +174,3 @@ pytest
 Pull requests should include tests that cover new behaviors, especially around scenario loading,
 forecasting, and optimization invariants.
 
-## Citation
-
-If this work contributes to your research or deployment studies, please cite the original Quality
-Time paper that inspired the optimization model:
-
-> Gitansh Khirbat, Hritik Bansal, Sanket Patil, Marcel Pfeiffer, Siddharth Garg, Nati Srebro, and
-> David Culler. "Carbon-Aware Quality Adaptation for Energy-Intensive Services." arXiv:2411.19058
-> (2024).
